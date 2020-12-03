@@ -37,6 +37,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -86,9 +87,11 @@ func NewActuator(params ActuatorParams) (*Actuator, error) {
 	}, nil
 }
 
-// Create creates a machine and is invoked by the Machine Controller
+// Create creates a machine and is invoked by the Machine Controller.
+// This will be called (in preference to Update()) when Exists() returns false,
+// provided that the Machine has not yet reached the Provisioned phase.
 func (a *Actuator) Create(ctx context.Context, machine *machinev1beta1.Machine) error {
-	log.Printf("Creating machine %v .", machine.Name)
+	log.Printf("Creating machine %v", machine.Name)
 
 	// load and validate the config
 	if machine.Spec.ProviderSpec.Value == nil {
@@ -104,12 +107,6 @@ func (a *Actuator) Create(ctx context.Context, machine *machinev1beta1.Machine) 
 		return a.setError(ctx, machine, err.Error())
 	}
 
-	// clear an error if one was previously set
-	err = a.clearError(ctx, machine)
-	if err != nil {
-		return err
-	}
-
 	// look for associated BMH
 	host, err := a.getHost(ctx, machine)
 	if err != nil {
@@ -123,7 +120,16 @@ func (a *Actuator) Create(ctx context.Context, machine *machinev1beta1.Machine) 
 			return err
 		}
 		if host == nil {
-			log.Printf("No available host found. Requeuing.")
+			errorReason := machinev1beta1.InsufficientResourcesMachineError
+			msg := "No available BareMetalHost found"
+			log.Printf("%s", msg)
+			if machine.Status.ErrorReason == nil || *machine.Status.ErrorReason != errorReason {
+				machine.Status.ErrorReason = &errorReason
+				machine.Status.ErrorMessage = &msg
+				if err := a.client.Status().Update(ctx, machine); err != nil {
+					return gherrors.Wrap(err, "failed to set insufficient resources error")
+				}
+			}
 			return &machineapierrors.RequeueAfterError{RequeueAfter: requeueAfter}
 		}
 		log.Printf("Associating machine %s with host %s", machine.Name, host.Name)
@@ -131,27 +137,19 @@ func (a *Actuator) Create(ctx context.Context, machine *machinev1beta1.Machine) 
 		log.Printf("Machine %s already associated with host %s", machine.Name, host.Name)
 	}
 
-	// Add a finalizer for the BMH. This will allow us to delete
-	// the Machine when the BMH is deleted.
-	if !utils.StringInList(host.Finalizers, machinev1beta1.MachineFinalizer) {
-		host.Finalizers = append(host.Finalizers, machinev1beta1.MachineFinalizer)
-	}
-
-	err = a.setHostSpec(ctx, host, machine, config)
-	if err != nil {
+	if err := a.provisionHost(ctx, host, machine, config); err != nil {
 		return err
 	}
 
-	_, err = a.ensureAnnotation(ctx, machine, host)
-	if err != nil {
+	if err := a.ensureAnnotation(ctx, machine, host); err != nil {
 		return err
 	}
 
-	if err := a.updateMachineStatus(ctx, machine, host); err != nil {
+	if err := a.clearInsufficientResourcesError(ctx, machine); err != nil {
 		return err
 	}
 
-	log.Printf("Finished creating machine %v .", machine.Name)
+	log.Printf("Finished creating machine %v", machine.Name)
 	return nil
 }
 
@@ -176,25 +174,14 @@ func (a *Actuator) Delete(ctx context.Context, machine *machinev1beta1.Machine) 
 	log.Printf("deleting machine %v using host %v", machine.Name, host.Name)
 
 	if host.Spec.ConsumerRef == nil {
-		log.Printf("removing host annotation from machine %v", machine.Name)
-		_, err := a.clearAnnotation(ctx, machine)
-		if err != nil {
-			return err
-		}
-		return nil // updating the machine will re-enqueue it without us asking
+		return a.releaseHost(ctx, host, machine)
 	}
 
-	// don't remove the ConsumerRef if it references some other
-	// machine, but remove the annotation linking this machine to the
-	// host so the current machine can continue deleting
+	// Don't deprovision the Host if it is consumed by some other machine
 	if !consumerRefMatches(host.Spec.ConsumerRef, machine) {
 		log.Printf("host associated with %v, not machine %v.",
 			host.Spec.ConsumerRef.Name, machine.Name)
-		_, err := a.clearAnnotation(ctx, machine)
-		if err != nil {
-			return err
-		}
-		return nil
+		return a.releaseHost(ctx, host, machine)
 	}
 
 	if host.Spec.Image != nil || host.Spec.Online || host.Spec.UserData != nil {
@@ -204,7 +191,7 @@ func (a *Actuator) Delete(ctx context.Context, machine *machinev1beta1.Machine) 
 		host.Spec.UserData = nil
 		err = a.client.Update(ctx, host)
 		if err != nil && !errors.IsNotFound(err) {
-			return err
+			return gherrors.Wrap(err, "failed to deprovision host")
 		}
 		return &machineapierrors.RequeueAfterError{}
 	}
@@ -224,75 +211,47 @@ func (a *Actuator) Delete(ctx context.Context, machine *machinev1beta1.Machine) 
 		return &machineapierrors.RequeueAfterError{RequeueAfter: requeueAfter}
 	}
 
-	log.Printf("clearing consumer reference for host %v", host.Name)
-	host.Spec.ConsumerRef = nil
-	if utils.StringInList(host.Finalizers, machinev1beta1.MachineFinalizer) {
-		log.Printf("clearing machine finalizer for host %v", host.Name)
-		host.Finalizers = utils.FilterStringFromList(
-			host.Finalizers, machinev1beta1.MachineFinalizer)
-	}
-	err = a.client.Update(ctx, host)
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-
-	return nil
+	return a.releaseHost(ctx, host, machine)
 }
 
 // Update updates a machine and is invoked by the Machine Controller
+// This is called when Exists() returns true and the Machine has not failed or been
+// deleted.
 func (a *Actuator) Update(ctx context.Context, machine *machinev1beta1.Machine) error {
 	log.Printf("Updating machine %v .", machine.Name)
-
-	// clear any error message that was previously set. This method doesn't set
-	// error messages yet, so we know that it's incorrect to have one here.
-	err := a.clearError(ctx, machine)
-	if err != nil {
-		return err
-	}
 
 	host, err := a.getHost(ctx, machine)
 	if err != nil {
 		return err
 	}
 	if host == nil {
-		// When finalizer for BHM is removed but an error occur before
-		// the Machine is deleted below in the StateDeleting block, the
-		// Machine should be deleted when no host is found.
-		log.Print("Deleting machine whose associated host is gone: ", machine.Name)
-		err = a.client.Delete(ctx, machine)
-		if err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-		log.Print("Deleted machine whose associated host is gone: ", machine.Name)
+		// If Host existed when we called Exists(), but not any more, return
+		// an error so that Exists() can return false on the next reconcile.
 		return fmt.Errorf("host not found for machine %s", machine.Name)
 	}
 
-	// Delete Machine when BareMetalHost is deleted.
-	// This is to ensure the MachineSet creates a new Machine
-	// containing the latest ProviderSpec.
-	if host.Status.Provisioning.State == bmh.StateDeleting {
-		if utils.StringInList(host.Finalizers, machinev1beta1.MachineFinalizer) {
-			log.Print("Removing finalizer for host: ", host.Name)
-			host.Finalizers = utils.FilterStringFromList(
-				host.Finalizers, machinev1beta1.MachineFinalizer)
-			err = a.client.Update(ctx, host)
-			if err != nil && !errors.IsNotFound(err) {
-				return err
-			}
-			log.Print("Removed finalizer for host: ", host.Name)
-		}
+	// Provisioning Phase
 
-		log.Print("Deleting machine whose associated host is gone: ", machine.Name)
-		err = a.client.Delete(ctx, machine)
-		if err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-		log.Print("Deleted machine whose associated host is gone: ", machine.Name)
-		return nil
+	if err := a.ensureMachineProviderID(ctx, machine, host); err != nil {
+		return err
 	}
 
-	dirty, err := a.ensureAnnotation(ctx, machine, host)
-	if err != nil {
+	// Provisioned Phase
+
+	if err := a.ensureMachineAddresses(ctx, machine, host); err != nil {
+		return err
+	}
+
+	// Make sure the annotation doesn't get out of sync with the
+	// ProvisioningID, in case we downgrade to an earlier version of CAPBM that
+	// relies on the annotation alone.
+	if err := a.ensureAnnotation(ctx, machine, host); err != nil {
+		return err
+	}
+
+	// Running phase
+
+	if err := a.ensureNodeProviderID(ctx, machine); err != nil {
 		return err
 	}
 
@@ -300,18 +259,7 @@ func (a *Actuator) Update(ctx context.Context, machine *machinev1beta1.Machine) 
 		return err
 	}
 
-	if !dirty {
-		if err := a.remediateIfNeeded(ctx, machine, host); err != nil {
-			return err
-		}
-	}
-
-	if err := a.updateMachineStatus(ctx, machine, host); err != nil {
-		return err
-	}
-
-	err = a.ensureProviderID(ctx, machine, host)
-	if err != nil {
+	if err := a.remediateIfNeeded(ctx, machine, host); err != nil {
 		return err
 	}
 
@@ -328,10 +276,40 @@ func (a *Actuator) Exists(ctx context.Context, machine *machinev1beta1.Machine) 
 	}
 	if host == nil {
 		log.Printf("Machine %v does not exist.", machine.Name)
-		return false, nil
+
+		// Clear machine addresses so that a new Node provisioned on a new Host
+		// with the same IP can be linked with its Machine and not get confused
+		// with this one.
+		return false, a.clearMachineAddresses(ctx, machine)
 	}
-	log.Printf("Machine %v exists.", machine.Name)
-	return true, nil
+
+	if !consumerRefMatches(host.Spec.ConsumerRef, machine) {
+		log.Printf("Machine %v does not have provisioned Host (%v is owned by %v).",
+			machine.Name, host.Name, host.Spec.ConsumerRef)
+		// Clear machine addresses so that a new Node provisioned on a new Host
+		// with the same IP can be linked with its Machine and not get confused
+		// with this one.
+		return false, a.clearMachineAddresses(ctx, machine)
+	}
+
+	switch host.Status.Provisioning.State {
+	case bmh.StateProvisioned, bmh.StateExternallyProvisioned:
+		log.Printf("Machine %v exists.", machine.Name)
+		return true, nil
+	case bmh.StateRegistering, bmh.StateRegistrationError, bmh.StatePowerManagementError:
+		// This case will no longer need to be handled once the changes proposed
+		// in https://github.com/metal3-io/baremetal-operator/pull/388 are
+		// available in the baremetal-operator.
+		log.Printf("Machine %v exists but Host is not manageable.", machine.Name)
+		return true, nil
+	default:
+		log.Printf("Machine %v does not have provisioned Host (%v is %s).",
+			machine.Name, host.Name, host.Status.Provisioning.State)
+		// Clear machine addresses so that a new Node provisioned on a new Host
+		// with the same IP can be linked with its Machine and not get confused
+		// with this one.
+		return false, a.clearMachineAddresses(ctx, machine)
+	}
 }
 
 // The Machine Actuator interface must implement GetIP and GetKubeConfig functions as a workaround for issues
@@ -350,35 +328,80 @@ func (a *Actuator) GetKubeConfig(controlPlaneMachine *machinev1beta1.Machine) (s
 	return "", fmt.Errorf("TODO: Not yet implemented")
 }
 
+func getHostKey(ctx context.Context, machine *machinev1beta1.Machine) (provider string, key *client.ObjectKey, uid *types.UID, err error) {
+	if machine.Spec.ProviderID != nil {
+		provider = *machine.Spec.ProviderID
+	}
+	if provider == "" {
+		// No provider ID, so try to get it from the annotation
+		annotations := machine.ObjectMeta.GetAnnotations()
+		if annotations == nil {
+			return
+		}
+		if annotation, ok := annotations[HostAnnotation]; ok {
+			provider = annotation
+		} else {
+			return
+		}
+		hostNamespace, hostName, parseErr := cache.SplitMetaNamespaceKey(provider)
+		if parseErr != nil {
+			log.Printf("Error parsing annotation value \"%s\": %v", provider, parseErr)
+			err = parseErr
+			return
+		}
+		key = &client.ObjectKey{
+			Namespace: hostNamespace,
+			Name:      hostName,
+		}
+		return
+	}
+
+	prefix := "baremetalhost:///"
+	if !strings.HasPrefix(provider, prefix) {
+		err = fmt.Errorf("ProviderID value %v is not a baremetalhost", provider)
+		return
+	}
+	fields := strings.Split(provider[len(prefix):], "/")
+	switch len(fields) {
+	case 2:
+	case 3:
+		uidField := types.UID(fields[2])
+		uid = &uidField
+	default:
+		err = fmt.Errorf("ProviderID value %v in unknown format", provider)
+		return
+	}
+	key = &client.ObjectKey{
+		Namespace: fields[0],
+		Name:      fields[1],
+	}
+
+	return
+}
+
 // getHost gets the associated host by looking for an annotation on the machine
 // that contains a reference to the host. Returns nil if not found. Assumes the
 // host is in the same namespace as the machine.
 func (a *Actuator) getHost(ctx context.Context, machine *machinev1beta1.Machine) (*bmh.BareMetalHost, error) {
-	annotations := machine.ObjectMeta.GetAnnotations()
-	if annotations == nil {
-		return nil, nil
-	}
-	hostKey, ok := annotations[HostAnnotation]
-	if !ok {
-		return nil, nil
-	}
-	hostNamespace, hostName, err := cache.SplitMetaNamespaceKey(hostKey)
+	provider, key, uid, err := getHostKey(ctx, machine)
 	if err != nil {
-		log.Printf("Error parsing annotation value \"%s\": %v", hostKey, err)
+		log.Printf("Failed to get Host key: %v", err)
 		return nil, err
+	}
+	if key == nil {
+		return nil, nil
 	}
 
 	host := bmh.BareMetalHost{}
-	key := client.ObjectKey{
-		Name:      hostName,
-		Namespace: hostNamespace,
-	}
-	err = a.client.Get(ctx, key, &host)
+	err = a.client.Get(ctx, *key, &host)
 	if errors.IsNotFound(err) {
-		log.Printf("Annotated host %s not found", hostKey)
+		log.Printf("Linked host %s not found", provider)
 		return nil, nil
 	} else if err != nil {
 		return nil, err
+	} else if uid != nil && host.UID != *uid {
+		// Host object has been replaced by a new one
+		return nil, nil
 	}
 	return &host, nil
 }
@@ -514,11 +537,12 @@ func consumerRefMatches(consumer *corev1.ObjectReference, machine *machinev1beta
 	return true
 }
 
-// setHostSpec will ensure the host's Spec is set according to the machine's
-// details. It will then update the host via the kube API. If UserData does not
-// include a Namespace, it will default to the Machine's namespace.
-func (a *Actuator) setHostSpec(ctx context.Context, host *bmh.BareMetalHost, machine *machinev1beta1.Machine,
+// provisionHost claims the BareMetalHost for this Machine and provisions it
+// according to the ProviderSpec.
+func (a *Actuator) provisionHost(ctx context.Context, host *bmh.BareMetalHost,
+	machine *machinev1beta1.Machine,
 	config *bmv1alpha1.BareMetalMachineProviderSpec) error {
+	originalHost := host.DeepCopy()
 
 	// We only want to update the image setting if the host does not
 	// already have an image.
@@ -532,6 +556,9 @@ func (a *Actuator) setHostSpec(ctx context.Context, host *bmh.BareMetalHost, mac
 			Checksum: config.Image.Checksum,
 		}
 		host.Spec.UserData = config.UserData
+
+		// If UserData does not include a Namespace, default to the Machine's
+		// namespace.
 		if host.Spec.UserData != nil && host.Spec.UserData.Namespace == "" {
 			host.Spec.UserData.Namespace = machine.Namespace
 		}
@@ -545,13 +572,56 @@ func (a *Actuator) setHostSpec(ctx context.Context, host *bmh.BareMetalHost, mac
 	}
 
 	host.Spec.Online = true
-	return a.client.Update(ctx, host)
+
+	if equality.Semantic.DeepEqual(originalHost, host) {
+		return nil
+	}
+	if err := a.client.Update(ctx, host); err != nil {
+		return gherrors.Wrap(err, "failed to provision host")
+	}
+	return nil
+}
+
+// releaseHost removes the ConsumerRef and the actuator's finalizer from the
+// BareMetalHost.
+func (a *Actuator) releaseHost(ctx context.Context, host *bmh.BareMetalHost, machine *machinev1beta1.Machine) error {
+	dirty := false
+	if consumerRefMatches(host.Spec.ConsumerRef, machine) {
+		log.Printf("clearing consumer reference for host %v", host.Name)
+		host.Spec.ConsumerRef = nil
+		dirty = true
+	} else {
+		if host.Spec.ConsumerRef != nil &&
+			host.Spec.ConsumerRef.Kind == "Machine" &&
+			host.Spec.ConsumerRef.APIVersion == machine.APIVersion {
+			// Host has been claimed by another Machine; leave that one to
+			// remove the finalizer
+			return nil
+		}
+	}
+	// We don't add a finalizer any more, but remove it if present in case it was
+	// added by a previous version of the actuator.
+	if utils.StringInList(host.Finalizers, machinev1beta1.MachineFinalizer) {
+		log.Printf("clearing machine finalizer for host %v", host.Name)
+		host.Finalizers = utils.FilterStringFromList(
+			host.Finalizers, machinev1beta1.MachineFinalizer)
+		dirty = true
+	}
+	if !dirty {
+		return nil
+	}
+
+	err := a.client.Update(ctx, host)
+	if err != nil && !errors.IsNotFound(err) {
+		return gherrors.Wrap(err, "failed to release host")
+	}
+	return nil
 }
 
 // ensureAnnotation makes sure the machine has an annotation that references the
-// host and uses the API to update the machine if necessary.
-// it returns a boolean to indicate if the machine object was changed
-func (a *Actuator) ensureAnnotation(ctx context.Context, machine *machinev1beta1.Machine, host *bmh.BareMetalHost) (bool, error) {
+// host and uses the API to update the machine if necessary. Returns a RequeueAfterError
+// if the Machine is modified.
+func (a *Actuator) ensureAnnotation(ctx context.Context, machine *machinev1beta1.Machine, host *bmh.BareMetalHost) error {
 	annotations := machine.ObjectMeta.GetAnnotations()
 	if annotations == nil {
 		annotations = make(map[string]string)
@@ -560,12 +630,12 @@ func (a *Actuator) ensureAnnotation(ctx context.Context, machine *machinev1beta1
 	hostKey, err := cache.MetaNamespaceKeyFunc(host)
 	if err != nil {
 		log.Printf("Error parsing annotation value \"%s\": %v", hostKey, err)
-		return false, err
+		return err
 	}
 	existing, ok := annotations[HostAnnotation]
 	if ok {
 		if existing == hostKey {
-			return false, nil
+			return nil
 		}
 		log.Printf("Warning: found stray annotation for host %s on machine %s. Overwriting.", existing, machine.Name)
 	}
@@ -573,49 +643,39 @@ func (a *Actuator) ensureAnnotation(ctx context.Context, machine *machinev1beta1
 	log.Printf("setting host annotation for %v to %v=%q", machine.Name, HostAnnotation, hostKey)
 	annotations[HostAnnotation] = hostKey
 	machine.ObjectMeta.SetAnnotations(annotations)
-	err = a.client.Update(ctx, machine)
-	if err != nil {
-		return false, gherrors.Wrap(err, "failed to update machine annotation")
+	if err := a.client.Update(ctx, machine); err != nil {
+		return gherrors.Wrap(err, "failed to update machine annotation")
 	}
-	return true, nil
+	return &machineapierrors.RequeueAfterError{}
 }
 
-// clearAnnotation makes sure the machine's host annotation is empty.
-// it returns a boolean to indicate if the machine object was changed
-func (a *Actuator) clearAnnotation(ctx context.Context, machine *machinev1beta1.Machine) (bool, error) {
-
-	annotations := machine.ObjectMeta.GetAnnotations()
-	if annotations == nil {
-		return false, nil
-	}
-
-	_, ok := annotations[HostAnnotation]
-	if !ok {
-		return false, nil
-	}
-
-	log.Printf("clearing host annotation for %v", machine.Name)
-	annotations[HostAnnotation] = ""
-	machine.ObjectMeta.SetAnnotations(annotations)
-	return true, a.client.Update(ctx, machine)
+// providerIDForHost returns a provider ID representing a given BareMetalHost
+func providerIDForHost(host *bmh.BareMetalHost) string {
+	return fmt.Sprintf("baremetalhost:///%s/%s/%s",
+		host.Namespace, host.Name, host.UID)
 }
 
-// ensureProviderID adds the providerID to the Machine spec, if it does
-// not already exist.  Also sets the corresponding ID on the related
-// Node when it becomes referenced via the Status.NodeRef
-func (a *Actuator) ensureProviderID(ctx context.Context, machine *machinev1beta1.Machine, host *bmh.BareMetalHost) error {
-	providerID := "baremetalhost:///" + host.Namespace + "/" + host.Name
+// ensureMachineProviderID adds the providerID to the Machine spec.
+func (a *Actuator) ensureMachineProviderID(ctx context.Context, machine *machinev1beta1.Machine, host *bmh.BareMetalHost) error {
 	existingProviderID := machine.Spec.ProviderID
-	if existingProviderID == nil || *existingProviderID != providerID {
+	// Node provider IDs are immutable, so don't modify an existing provider ID
+	if existingProviderID == nil || *existingProviderID == "" {
+		providerID := providerIDForHost(host)
 		log.Printf("Setting ProviderID %s for machine %s.", providerID, machine.Name)
 		machine.Spec.ProviderID = &providerID
 		err := a.client.Update(ctx, machine)
 		if err != nil {
-			log.Printf("Failed to update machine ProviderID, error: %s", err.Error())
-			return err
+			log.Printf("Failed to set machine ProviderID, error: %s", err.Error())
+			return gherrors.Wrap(err, "failed to set machine provider id")
 		}
+		return &machineapierrors.RequeueAfterError{}
 	}
+	return nil
+}
 
+// ensureNodeProviderID adds the ProviderID for the Machine to the Node spec
+// when it becomes referenced via the Status.NodeRef.
+func (a *Actuator) ensureNodeProviderID(ctx context.Context, machine *machinev1beta1.Machine) error {
 	node, err := a.getNodeByMachine(ctx, machine)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -626,12 +686,20 @@ func (a *Actuator) ensureProviderID(ctx context.Context, machine *machinev1beta1
 		return err
 	}
 
-	log.Printf("Setting ProviderID %s for node %s.", providerID, node.Name)
-	node.Spec.ProviderID = providerID
-	err = a.client.Update(ctx, node)
-	if err != nil {
-		log.Printf("Failed to update node ProviderID, error: %s", err.Error())
-		return err
+	if machine.Spec.ProviderID == nil {
+		return fmt.Errorf("Cannot set Node ProviderID - Machine ProviderID not available")
+	}
+	providerID := *machine.Spec.ProviderID
+
+	if node.Spec.ProviderID != providerID {
+		log.Printf("Setting ProviderID %s for node %s.", providerID, node.Name)
+		node.Spec.ProviderID = providerID
+		err = a.client.Update(ctx, node)
+		if err != nil {
+			log.Printf("Failed to update node ProviderID, error: %s", err.Error())
+			return gherrors.Wrap(err, "failed to set node provider id")
+		}
+		return &machineapierrors.RequeueAfterError{}
 	}
 
 	return nil
@@ -674,18 +742,20 @@ func (a *Actuator) setError(ctx context.Context, machine *machinev1beta1.Machine
 	return a.client.Status().Update(ctx, machine)
 }
 
-// clearError removes the ErrorMessage from the machine's Status if set. Returns
-// nil if ErrorMessage was already nil. Returns a RequeueAfterError if the
-// machine was updated.
-func (a *Actuator) clearError(ctx context.Context, machine *machinev1beta1.Machine) error {
-	if machine.Status.ErrorMessage != nil || machine.Status.ErrorReason != nil {
+// clearInsufficientResourcesError removes the ErrorMessage from the machine's
+// Status if an InsufficientResources error is set. Returns nil if ErrorMessage
+// was already nil. Returns a RequeueAfterError if the machine was updated.
+func (a *Actuator) clearInsufficientResourcesError(ctx context.Context, machine *machinev1beta1.Machine) error {
+	if machine.Status.ErrorReason != nil && *machine.Status.ErrorReason == machinev1beta1.InsufficientResourcesMachineError {
+		now := metav1.Now()
+		machine.Status.LastUpdated = &now // Restart the clock for MachineHealthCheck
 		machine.Status.ErrorMessage = nil
 		machine.Status.ErrorReason = nil
+		log.Printf("Clearing insufficient resources error from machine %s", machine.Name)
 		err := a.client.Status().Update(ctx, machine)
 		if err != nil {
-			return err
+			return gherrors.Wrap(err, "failed to clear machine error")
 		}
-		log.Printf("Cleared error message from machine %s", machine.Name)
 		return &machineapierrors.RequeueAfterError{}
 	}
 	return nil
@@ -707,8 +777,24 @@ func configFromProviderSpec(providerSpec machinev1beta1.ProviderSpec) (*bmv1alph
 	return &config, nil
 }
 
-// updateMachineStatus updates a machine object's status.
-func (a *Actuator) updateMachineStatus(ctx context.Context, machine *machinev1beta1.Machine, host *bmh.BareMetalHost) error {
+// clearMachineAddresses clears the Host IP addresses in the Machine status, so
+// that another Host using the same IP can later be used by another Machine.
+func (a *Actuator) clearMachineAddresses(ctx context.Context, machine *machinev1beta1.Machine) error {
+	var err error
+	// If the Machine is already in the process of being deleted (or has no
+	// addresses set), there is no need to clear them.
+	if machine.ObjectMeta.DeletionTimestamp.IsZero() && len(machine.Status.Addresses) > 0 {
+		log.Printf("Clearing addresses for machine %s", machine.Name)
+		err = a.ensureMachineAddresses(ctx, machine, nil)
+		if _, isRequeueAfter := err.(*machineapierrors.RequeueAfterError); isRequeueAfter {
+			err = nil
+		}
+	}
+	return err
+}
+
+// ensureMachineAddresses updates the Host IP addresses in the Machine status.
+func (a *Actuator) ensureMachineAddresses(ctx context.Context, machine *machinev1beta1.Machine, host *bmh.BareMetalHost) error {
 	addrs, err := a.nodeAddresses(host)
 	if err != nil {
 		return err
@@ -733,8 +819,11 @@ func (a *Actuator) applyMachineStatus(ctx context.Context, machine *machinev1bet
 	now := metav1.Now()
 	machineCopy.Status.LastUpdated = &now
 
-	err := a.client.Status().Update(ctx, machineCopy)
-	return err
+	log.Printf("Updating addresses for machine %s", machine.Name)
+	if err := a.client.Status().Update(ctx, machineCopy); err != nil {
+		return gherrors.Wrap(err, "failed to update machine status")
+	}
+	return &machineapierrors.RequeueAfterError{}
 }
 
 // NodeAddresses returns a slice of corev1.NodeAddress objects for a

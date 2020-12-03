@@ -2,6 +2,7 @@ package machine
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
@@ -447,7 +449,7 @@ func TestChooseHost(t *testing.T) {
 	}
 }
 
-func TestSetHostSpec(t *testing.T) {
+func TestProvisionHost(t *testing.T) {
 	for _, tc := range []struct {
 		Scenario                  string
 		UserDataNamespace         string
@@ -572,7 +574,7 @@ func TestSetHostSpec(t *testing.T) {
 			}
 
 			// run the function
-			err = actuator.setHostSpec(context.TODO(), &tc.Host, &machine, config)
+			err = actuator.provisionHost(context.TODO(), &tc.Host, &machine, config)
 			if err != nil {
 				t.Errorf("%v", err)
 				return
@@ -642,6 +644,14 @@ func TestExists(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "somehost",
 			Namespace: "myns",
+		},
+		Spec: bmh.BareMetalHostSpec{
+			ConsumerRef: &corev1.ObjectReference{},
+		},
+		Status: bmh.BareMetalHostStatus{
+			Provisioning: bmh.ProvisionStatus{
+				State: bmh.StateProvisioned,
+			},
 		},
 	}
 	c := fakeclient.NewFakeClientWithScheme(scheme, &host)
@@ -777,6 +787,8 @@ func TestEnsureProviderID(t *testing.T) {
 
 	c := fakeclient.NewFakeClientWithScheme(scheme)
 
+	uid := uuid.NewUUID()
+
 	testCases := []struct {
 		Machine machinev1beta1.Machine
 		Host    bmh.BareMetalHost
@@ -793,6 +805,7 @@ func TestEnsureProviderID(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "myhost",
 					Namespace: "myns",
+					UID:       uid,
 				},
 			},
 		},
@@ -814,6 +827,7 @@ func TestEnsureProviderID(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "myhost2",
 					Namespace: "myns2",
+					UID:       uid,
 				},
 			},
 			Node: corev1.Node{
@@ -838,10 +852,8 @@ func TestEnsureProviderID(t *testing.T) {
 			t.Error(err)
 		}
 
-		err = actuator.ensureProviderID(context.TODO(), &tc.Machine, &tc.Host)
-		if err != nil {
-			t.Errorf("unexpected error %v", err)
-		}
+		err = actuator.ensureMachineProviderID(context.TODO(), &tc.Machine, &tc.Host)
+		expectRequeueAfterError(err, t)
 
 		// get the machine and make sure it has the correct ProviderID
 		machine := machinev1beta1.Machine{}
@@ -854,12 +866,15 @@ func TestEnsureProviderID(t *testing.T) {
 		if providerID == nil {
 			t.Error("no machine.Spec.ProviderID found")
 		}
-		expectedProviderID := "baremetalhost:///" + tc.Host.Namespace + "/" + tc.Host.Name
+		expectedProviderID := "baremetalhost:///" + tc.Host.Namespace + "/" + tc.Host.Name + "/" + string(uid)
 		if *providerID != expectedProviderID {
 			t.Errorf("ProviderID has value %s, expected %s",
 				*providerID, expectedProviderID)
 		}
 		if tc.Node.Name != "" {
+			err = actuator.ensureNodeProviderID(context.TODO(), &tc.Machine)
+			expectRequeueAfterError(err, t)
+
 			node := &corev1.Node{}
 			nodeKey := client.ObjectKey{
 				Name:      tc.Node.Name,
@@ -963,9 +978,11 @@ func TestEnsureAnnotation(t *testing.T) {
 				t.Error(err)
 			}
 
-			_, err = actuator.ensureAnnotation(context.TODO(), &tc.Machine, &tc.Host)
+			err = actuator.ensureAnnotation(context.TODO(), &tc.Machine, &tc.Host)
 			if err != nil {
-				t.Errorf("unexpected error %v", err)
+				if _, ok := err.(*machineapierrors.RequeueAfterError); !ok {
+					t.Errorf("unexpected error %v", err)
+				}
 			}
 
 			// get the machine and make sure it has the correct annotation
@@ -1279,7 +1296,7 @@ func TestDelete(t *testing.T) {
 		},
 
 		{
-			CaseName: "no consumer ref, so this is a no-op",
+			CaseName: "no consumer ref, so remove machine finalizer",
 			Host: &bmh.BareMetalHost{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "myhost",
@@ -1302,7 +1319,7 @@ func TestDelete(t *testing.T) {
 					},
 				},
 			},
-			ExpectHostFinalizer: true,
+			ExpectHostFinalizer: false,
 		},
 
 		{
@@ -1453,7 +1470,7 @@ func newConfig(t *testing.T, UserDataNamespace string, labels map[string]string,
 	}
 }
 
-func TestUpdateMachineStatus(t *testing.T) {
+func TestEnsureMachineAddresses(t *testing.T) {
 	scheme := runtime.NewScheme()
 	machinev1beta1.AddToScheme(scheme)
 
@@ -1469,6 +1486,7 @@ func TestUpdateMachineStatus(t *testing.T) {
 		Host            *bmh.BareMetalHost
 		Machine         *machinev1beta1.Machine
 		ExpectedMachine machinev1beta1.Machine
+		Changed         bool
 	}{
 		{
 			// machine status updated
@@ -1500,6 +1518,7 @@ func TestUpdateMachineStatus(t *testing.T) {
 					},
 				},
 			},
+			Changed: true,
 		},
 		{
 			// machine status unchanged
@@ -1542,6 +1561,7 @@ func TestUpdateMachineStatus(t *testing.T) {
 					},
 				},
 			},
+			Changed: false,
 		},
 		{
 			// machine status unchanged
@@ -1556,6 +1576,7 @@ func TestUpdateMachineStatus(t *testing.T) {
 			ExpectedMachine: machinev1beta1.Machine{
 				Status: machinev1beta1.MachineStatus{},
 			},
+			Changed: false,
 		},
 	}
 
@@ -1571,9 +1592,13 @@ func TestUpdateMachineStatus(t *testing.T) {
 			t.Error(err)
 		}
 
-		err = actuator.updateMachineStatus(context.TODO(), tc.Machine, tc.Host)
-		if err != nil {
-			t.Errorf("unexpected error %v", err)
+		err = actuator.ensureMachineAddresses(context.TODO(), tc.Machine, tc.Host)
+		if tc.Changed {
+			expectRequeueAfterError(err, t)
+		} else {
+			if err != nil {
+				t.Errorf("unexpected error %v", err)
+			}
 		}
 		key := client.ObjectKey{
 			Name:      tc.Machine.Name,
@@ -1619,6 +1644,7 @@ func TestApplyMachineStatus(t *testing.T) {
 		Machine               *machinev1beta1.Machine
 		Addresses             []corev1.NodeAddress
 		ExpectedNodeAddresses []corev1.NodeAddress
+		Changed               bool
 	}{
 		{
 			// Machine status updated
@@ -1633,6 +1659,7 @@ func TestApplyMachineStatus(t *testing.T) {
 			},
 			Addresses:             []corev1.NodeAddress{addr1, addr2},
 			ExpectedNodeAddresses: []corev1.NodeAddress{addr1, addr2},
+			Changed:               true,
 		},
 		{
 			// Machine status unchanged
@@ -1647,6 +1674,7 @@ func TestApplyMachineStatus(t *testing.T) {
 			},
 			Addresses:             []corev1.NodeAddress{addr1, addr2},
 			ExpectedNodeAddresses: []corev1.NodeAddress{addr1, addr2},
+			Changed:               false,
 		},
 	}
 
@@ -1663,8 +1691,12 @@ func TestApplyMachineStatus(t *testing.T) {
 		}
 
 		err = actuator.applyMachineStatus(context.TODO(), tc.Machine, tc.Addresses)
-		if err != nil {
-			t.Errorf("unexpected error %v", err)
+		if tc.Changed {
+			expectRequeueAfterError(err, t)
+		} else {
+			if err != nil {
+				t.Errorf("unexpected error %v", err)
+			}
 		}
 
 		key := client.ObjectKey{
@@ -1792,132 +1824,6 @@ func TestNodeAddresses(t *testing.T) {
 	}
 }
 
-func TestDeleteOfBareMetalHostDeletesMachine(t *testing.T) {
-	scheme := runtime.NewScheme()
-	machinev1beta1.AddToScheme(scheme)
-	bmoapis.AddToScheme(scheme)
-
-	testCases := []struct {
-		CaseName              string
-		Host                  *bmh.BareMetalHost
-		Machine               *machinev1beta1.Machine
-		ExpectedMachineExists bool
-	}{
-		{
-			CaseName: "machine should not be deleted",
-			Host: &bmh.BareMetalHost{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "myhost1",
-					Namespace: "myns",
-				},
-				Spec: bmh.BareMetalHostSpec{
-					ConsumerRef: &corev1.ObjectReference{
-						Name:       "mymachine1",
-						Namespace:  "myns",
-						Kind:       "Machine",
-						APIVersion: machinev1beta1.SchemeGroupVersion.String(),
-					},
-				},
-				Status: bmh.BareMetalHostStatus{
-					HardwareProfile: "dell",
-					Provisioning: bmh.ProvisionStatus{
-						State: "ready",
-					},
-				},
-			},
-			Machine: &machinev1beta1.Machine{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "mymachine1",
-					Namespace: "myns",
-					Annotations: map[string]string{
-						HostAnnotation: "myns/myhost1",
-					},
-				},
-				Status: machinev1beta1.MachineStatus{},
-			},
-			ExpectedMachineExists: true,
-		},
-		{
-			CaseName: "machine should be deleted",
-			Host: &bmh.BareMetalHost{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "myhost2",
-					Namespace: "myns",
-				},
-				Spec: bmh.BareMetalHostSpec{
-					ConsumerRef: &corev1.ObjectReference{
-						Name:       "mymachine2",
-						Namespace:  "myns",
-						Kind:       "Machine",
-						APIVersion: machinev1beta1.SchemeGroupVersion.String(),
-					},
-				},
-				Status: bmh.BareMetalHostStatus{
-					HardwareProfile: "dell",
-					Provisioning: bmh.ProvisionStatus{
-						State: "deleting",
-					},
-				},
-			},
-			Machine: &machinev1beta1.Machine{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "mymachine2",
-					Namespace: "myns",
-					Annotations: map[string]string{
-						HostAnnotation: "myns/myhost2",
-					},
-				},
-				Status: machinev1beta1.MachineStatus{},
-			},
-			ExpectedMachineExists: false,
-		},
-	}
-
-	for _, tc := range testCases {
-		c := fakeclient.NewFakeClientWithScheme(scheme)
-		if tc.Machine != nil {
-			c.Create(context.TODO(), tc.Machine)
-		}
-		if tc.Host != nil {
-			c.Create(context.TODO(), tc.Host)
-		}
-		actuator, err := NewActuator(ActuatorParams{
-			Client: c,
-		})
-		if err != nil {
-			t.Error(err)
-		}
-
-		err = actuator.Update(context.TODO(), tc.Machine)
-		if err != nil {
-			t.Errorf("unexpected error %v", err)
-		}
-
-		if &tc.Machine != nil {
-			key := client.ObjectKey{
-				Name:      tc.Machine.Name,
-				Namespace: tc.Machine.Namespace,
-			}
-			machine := machinev1beta1.Machine{}
-
-			err = c.Get(context.TODO(), key, &machine)
-			if tc.ExpectedMachineExists == false {
-				if !errors.IsNotFound(err) {
-					t.Errorf("Expected machine to not exist but received error: %v", err)
-				}
-			} else {
-				result, err := actuator.Exists(context.TODO(), tc.Machine)
-				if err != nil {
-					t.Error(err)
-				}
-				if tc.ExpectedMachineExists != result {
-					t.Errorf("ExpectedMachineExists: %v, found %v", tc.ExpectedMachineExists, result)
-				}
-			}
-		}
-	}
-}
-
 func TestMarshalAndUnmarshal(t *testing.T) {
 	m := map[string]string{"key1": "val1", "keyWithEmptyValue": "", "key.with.dots": "value.with.dots"}
 
@@ -1998,7 +1904,6 @@ func TestRemediation(t *testing.T) {
 	//starting test with machine that needs remediation
 	machine.Annotations = make(map[string]string)
 	machine.Annotations[HostAnnotation] = host.Namespace + "/" + host.Name
-	machine.Annotations[externalRemediationAnnotation] = ""
 
 	scheme := runtime.NewScheme()
 	machinev1beta1.AddToScheme(scheme)
@@ -2017,6 +1922,18 @@ func TestRemediation(t *testing.T) {
 	c.Create(context.TODO(), machine)
 	c.Create(context.TODO(), host)
 	c.Create(context.TODO(), node)
+
+	err = updateUntilDone(actuator, machine)
+	if err != nil {
+		t.Errorf("unexpected error %v", err)
+	}
+
+	machine = &machinev1beta1.Machine{}
+	c.Get(context.TODO(), machineNamespacedName, machine)
+	machine.Annotations[externalRemediationAnnotation] = ""
+	c.Update(context.TODO(), machine)
+	machine = &machinev1beta1.Machine{}
+	c.Get(context.TODO(), machineNamespacedName, machine)
 
 	err = actuator.Update(context.TODO(), machine)
 	if err != nil {
@@ -2046,7 +1963,7 @@ func TestRemediation(t *testing.T) {
 	machine = &machinev1beta1.Machine{}
 	c.Get(context.TODO(), machineNamespacedName, machine)
 	err = actuator.Update(context.TODO(), machine)
-	expectRequetAfterError(err, t)
+	expectRequeueAfterError(err, t)
 
 	node = &corev1.Node{}
 	err = c.Get(context.TODO(), nodeNamespacedName, node)
@@ -2073,7 +1990,7 @@ func TestRemediation(t *testing.T) {
 	c.Create(context.TODO(), nodeBackup)
 
 	err = actuator.Update(context.TODO(), machine)
-	expectRequetAfterError(err, t)
+	expectRequeueAfterError(err, t)
 	node = &corev1.Node{}
 	c.Get(context.TODO(), nodeNamespacedName, node)
 
@@ -2120,7 +2037,7 @@ func TestRemediation(t *testing.T) {
 	machine = &machinev1beta1.Machine{}
 	c.Get(context.TODO(), machineNamespacedName, machine)
 
-	err = actuator.Update(context.TODO(), machine)
+	err = updateUntilDone(actuator, machine)
 	if err != nil {
 		t.Errorf("unexpected error %v", err)
 	}
@@ -2329,7 +2246,7 @@ func TestCanReprovision(t *testing.T) {
 	}
 }
 
-func expectRequetAfterError(err error, t *testing.T) {
+func expectRequeueAfterError(err error, t *testing.T) {
 	if err == nil {
 		t.Errorf("expected a requeue err but err was nil")
 	} else {
@@ -2340,6 +2257,17 @@ func expectRequetAfterError(err error, t *testing.T) {
 			t.Errorf("unexpected error %v", err)
 		}
 	}
+}
+
+func updateUntilDone(actuator *Actuator, machine *machinev1beta1.Machine) error {
+	attempts := 5
+	for i := 0; i < attempts; i++ {
+		err := actuator.Update(context.TODO(), machine)
+		if _, isRequeue := err.(*machineapierrors.RequeueAfterError); !isRequeue {
+			return err
+		}
+	}
+	return fmt.Errorf("Update() did not converge within %d attempts", attempts)
 }
 
 func getNode(name string) (*corev1.Node, types.NamespacedName) {
