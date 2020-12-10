@@ -293,7 +293,7 @@ func (a *Actuator) Exists(ctx context.Context, machine *machinev1beta1.Machine) 
 	}
 
 	switch host.Status.Provisioning.State {
-	case bmh.StateProvisioned, bmh.StateExternallyProvisioned:
+	case bmh.StateProvisioned, bmh.StateExternallyProvisioned, bmh.StateUnmanaged:
 		log.Printf("Machine %v exists.", machine.Name)
 		return true, nil
 	case bmh.StateRegistering, bmh.StateRegistrationError, bmh.StatePowerManagementError:
