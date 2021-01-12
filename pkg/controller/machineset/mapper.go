@@ -10,7 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -25,9 +24,9 @@ type msmapper struct {
 
 // Map will return reconcile requests for a MachineSet if the event is for a
 // BareMetalHost and that BareMetalHost matches the MachineSet's HostSelector.
-func (m *msmapper) Map(obj handler.MapObject) []reconcile.Request {
+func (m *msmapper) Map(obj client.Object) []reconcile.Request {
 	requests := []reconcile.Request{}
-	if host, ok := obj.Object.(*bmh.BareMetalHost); ok {
+	if host, ok := obj.(*bmh.BareMetalHost); ok {
 		msets := machinev1beta1.MachineSetList{}
 		err := m.client.List(context.TODO(), &msets, &client.ListOptions{Namespace: host.Namespace})
 		if err != nil {
