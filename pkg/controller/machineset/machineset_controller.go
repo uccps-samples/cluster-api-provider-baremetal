@@ -70,10 +70,9 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	if err != nil {
 		return err
 	}
-
 	mapper := msmapper{client: mgr.GetClient()}
 	err = c.Watch(&source.Kind{Type: &bmh.BareMetalHost{}},
-		&handler.EnqueueRequestsFromMapFunc{ToRequests: &mapper}, predicate.ResourceVersionChangedPredicate{})
+		handler.EnqueueRequestsFromMapFunc(mapper.Map), predicate.ResourceVersionChangedPredicate{})
 	if err != nil {
 		return err
 	}

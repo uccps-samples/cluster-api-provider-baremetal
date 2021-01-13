@@ -9,13 +9,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-type nodeMapper struct{}
-
 const MachineAnnotation = "machine.openshift.io/machine"
 
 // Map will return a reconcile request for a Machine if the event is for a
 // Node and that Node references a Machine.
-func (m *nodeMapper) Map(obj client.Object) []reconcile.Request {
+func nodeMap(obj client.Object) []reconcile.Request {
 	if node, ok := obj.(*corev1.Node); ok {
 		machineKey, ok := node.Annotations[MachineAnnotation]
 		if !ok {
