@@ -349,7 +349,7 @@ func TestScale(t *testing.T) {
 	}
 
 	// Run reconciliation
-	_, err = reconciler.Reconcile(reconcile.Request{NamespacedName: machinesetKey1})
+	_, err = reconciler.Reconcile(context.TODO(), reconcile.Request{NamespacedName: machinesetKey1})
 	if err != nil {
 		t.Errorf("%v", err)
 	}
@@ -374,7 +374,7 @@ func TestScale(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 
-	_, err = reconciler.Reconcile(reconcile.Request{NamespacedName: machinesetKey1})
+	_, err = reconciler.Reconcile(context.TODO(), reconcile.Request{NamespacedName: machinesetKey1})
 	if err != nil {
 		t.Errorf("%v", err)
 	}
@@ -432,7 +432,7 @@ func TestIgnore(t *testing.T) {
 	}
 
 	// Run reconciliation
-	_, err = reconciler.Reconcile(reconcile.Request{NamespacedName: machinesetKey2})
+	_, err = reconciler.Reconcile(context.TODO(), reconcile.Request{NamespacedName: machinesetKey2})
 	if err != nil {
 		t.Errorf("%v", err)
 	}

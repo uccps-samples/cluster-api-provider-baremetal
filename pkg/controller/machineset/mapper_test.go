@@ -26,11 +26,12 @@ import (
 	machinev1beta1 "github.com/openshift/machine-api-operator/pkg/apis/machine/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
 
 func TestMapper(t *testing.T) {
+	var mo client.Object
 	scheme := runtime.NewScheme()
 	machinev1beta1.AddToScheme(scheme)
 	bmoapis.AddToScheme(scheme)
@@ -87,10 +88,7 @@ func TestMapper(t *testing.T) {
 		c := fakeclient.NewFakeClientWithScheme(scheme, ms, tc.Host)
 		mapper := msmapper{client: c}
 
-		mo := handler.MapObject{
-			Object: tc.Host,
-			Meta:   &tc.Host.ObjectMeta,
-		}
+		mo = tc.Host
 		requests := mapper.Map(mo)
 
 		if tc.ExpectRequest {

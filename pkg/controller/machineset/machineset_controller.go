@@ -31,10 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
@@ -70,10 +70,9 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	if err != nil {
 		return err
 	}
-
 	mapper := msmapper{client: mgr.GetClient()}
 	err = c.Watch(&source.Kind{Type: &bmh.BareMetalHost{}},
-		&handler.EnqueueRequestsFromMapFunc{ToRequests: &mapper}, predicate.ResourceVersionChangedPredicate{})
+		handler.EnqueueRequestsFromMapFunc(mapper.Map), predicate.ResourceVersionChangedPredicate{})
 	if err != nil {
 		return err
 	}
@@ -93,9 +92,8 @@ type ReconcileMachineSet struct {
 // and what is in the MachineSet.Spec
 // Automatically generate RBAC rules to allow the Controller to read and write Deployments
 // +kubebuilder:rbac:groups=cluster.k8s.io,resources=machinesets,verbs=get;list;watch;update;patch
-func (r *ReconcileMachineSet) Reconcile(request reconcile.Request) (reconcile.Result, error) {
+func (r *ReconcileMachineSet) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	log := log.WithValues("MachineSet", request.NamespacedName.String())
-	ctx := context.TODO()
 	// Fetch the MachineSet instance
 	instance := &machinev1beta1.MachineSet{}
 	err := r.Get(ctx, request.NamespacedName, instance)

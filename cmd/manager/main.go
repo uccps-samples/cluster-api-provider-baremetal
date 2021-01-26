@@ -33,11 +33,12 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/klogr"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/signals"
+	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 )
 
 // The default durations for the leader election operations.
@@ -89,7 +90,7 @@ func main() {
 	flag.Parse()
 
 	log := logf.Log.WithName("baremetal-controller-manager")
-	logf.SetLogger(logf.ZapLogger(false))
+	logf.SetLogger(klogr.New())
 	entryLog := log.WithName("entrypoint")
 
 	cfg := config.GetConfigOrDie()
