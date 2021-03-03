@@ -14,7 +14,7 @@ all: test manager
 test: generate fmt vet unit
 
 .PHONY: unit
-unit: manifests unit-test
+unit: unit-test
 
 .PHONY: unit-test
 unit-test:
@@ -27,16 +27,9 @@ run: generate fmt vet
 
 # Install CRDs into a cluster
 .PHONY: install
-install: manifests
+install:
 	kubectl apply -f vendor/github.com/openshift/machine-api-operator/install
-	kubectl apply -f config/crds
 	kustomize build config | kubectl apply -f -
-
-# Generate manifests e.g. CRD, RBAC etc.
-.PHONY: manifests
-manifests:
-	go run vendor/sigs.k8s.io/controller-tools/cmd/controller-gen/main.go crd paths=./pkg/apis/... output:crd:dir=./config/crds/
-	@sed -i '/^    controller-gen.kubebuilder.io\/version: (devel)/d' config/crds/*
 
 # Run go fmt against code
 .PHONY: fmt
