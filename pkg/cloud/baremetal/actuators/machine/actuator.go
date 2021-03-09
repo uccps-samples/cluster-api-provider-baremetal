@@ -632,16 +632,23 @@ func (a *Actuator) ensureAnnotation(ctx context.Context, machine *machinev1beta1
 		log.Printf("Error parsing annotation value \"%s\": %v", hostKey, err)
 		return err
 	}
-	existing, ok := annotations[HostAnnotation]
-	if ok {
-		if existing == hostKey {
-			return nil
+	newValues := map[string]string{
+		HostAnnotation: hostKey,
+		machineapierrors.MachineInstanceStateAnnotationName: string(host.Status.Provisioning.State),
+	}
+	needsChanging := false
+	for newKey, newValue := range newValues {
+		existing, ok := annotations[newKey]
+		if !ok || existing != newValue {
+			log.Printf("setting annotation for %v to %v=%q", machine.Name, newKey, newValue)
+			annotations[newKey] = newValue
+			needsChanging = true
 		}
-		log.Printf("Warning: found stray annotation for host %s on machine %s. Overwriting.", existing, machine.Name)
+	}
+	if !needsChanging {
+		return nil
 	}
 
-	log.Printf("setting host annotation for %v to %v=%q", machine.Name, HostAnnotation, hostKey)
-	annotations[HostAnnotation] = hostKey
 	machine.ObjectMeta.SetAnnotations(annotations)
 	if err := a.client.Update(ctx, machine); err != nil {
 		return gherrors.Wrap(err, "failed to update machine annotation")

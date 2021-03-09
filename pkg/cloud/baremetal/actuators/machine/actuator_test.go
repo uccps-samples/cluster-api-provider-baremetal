@@ -892,7 +892,7 @@ func TestEnsureProviderID(t *testing.T) {
 
 func TestEnsureAnnotation(t *testing.T) {
 	scheme := runtime.NewScheme()
-	machinev1beta1.AddToScheme(scheme)
+	_ = machinev1beta1.AddToScheme(scheme)
 
 	testCases := []struct {
 		Scenario string
@@ -915,6 +915,11 @@ func TestEnsureAnnotation(t *testing.T) {
 					Name:      "myhost",
 					Namespace: "myns",
 				},
+				Status: bmh.BareMetalHostStatus{
+					Provisioning: bmh.ProvisionStatus{
+						State: bmh.StateReady,
+					},
+				},
 			},
 		},
 		{
@@ -933,6 +938,11 @@ func TestEnsureAnnotation(t *testing.T) {
 					Name:      "myhost",
 					Namespace: "myns",
 				},
+				Status: bmh.BareMetalHostStatus{
+					Provisioning: bmh.ProvisionStatus{
+						State: bmh.StateReady,
+					},
+				},
 			},
 		},
 		{
@@ -949,6 +959,11 @@ func TestEnsureAnnotation(t *testing.T) {
 					Name:      "myhost",
 					Namespace: "myns",
 				},
+				Status: bmh.BareMetalHostStatus{
+					Provisioning: bmh.ProvisionStatus{
+						State: bmh.StateReady,
+					},
+				},
 			},
 		},
 		{
@@ -963,6 +978,11 @@ func TestEnsureAnnotation(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "myhost",
 					Namespace: "myns",
+				},
+				Status: bmh.BareMetalHostStatus{
+					Provisioning: bmh.ProvisionStatus{
+						State: bmh.StateReady,
+					},
 				},
 			},
 		},
@@ -992,6 +1012,9 @@ func TestEnsureAnnotation(t *testing.T) {
 				Namespace: tc.Machine.Namespace,
 			}
 			err = c.Get(context.TODO(), key, &machine)
+			if err != nil {
+				t.Error(err)
+			}
 			annotations := machine.ObjectMeta.GetAnnotations()
 			if annotations == nil {
 				t.Error("no annotations found")
@@ -1002,6 +1025,13 @@ func TestEnsureAnnotation(t *testing.T) {
 			}
 			if result != "myns/myhost" {
 				t.Errorf("host annotation has value %s, expected \"myns/myhost\"", result)
+			}
+			result, ok = annotations[machineapierrors.MachineInstanceStateAnnotationName]
+			if !ok {
+				t.Error("instance-state annotation not found")
+			}
+			if result != "ready" {
+				t.Errorf("instance-state annotation has value %s, expected \"ready\"", result)
 			}
 		})
 	}
