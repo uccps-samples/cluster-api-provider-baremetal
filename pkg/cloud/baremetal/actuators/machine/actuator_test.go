@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
+	"encoding/json"
 	"reflect"
 
-	bmoapis "github.com/metal3-io/baremetal-operator/pkg/apis"
-	bmh "github.com/metal3-io/baremetal-operator/pkg/apis/metal3/v1alpha1"
+	bmoapis "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
+	bmh "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
 	"github.com/metal3-io/baremetal-operator/pkg/utils"
 	bmv1alpha1 "github.com/openshift/cluster-api-provider-baremetal/pkg/apis/baremetal/v1alpha1"
 	machinev1beta1 "github.com/openshift/machine-api-operator/pkg/apis/machine/v1beta1"
@@ -107,7 +107,7 @@ func TestChooseHost(t *testing.T) {
 		Status: bmh.BareMetalHostStatus{
 			ErrorMessage: "this host is discovered and not usable",
 			Provisioning: bmh.ProvisionStatus{
-				State: bmh.StateRegistrationError,
+				State: bmh.StateRegistering,
 			},
 		},
 	}
@@ -1947,6 +1947,13 @@ func TestRemediation(t *testing.T) {
 		t.Fail()
 	}
 
+	// Get the remediation power off annotation and check that it matches RebootModeHard
+	remediationString := host.Annotations[requestPowerOffAnnotation]
+	remediationAnnotation := bmh.RebootAnnotationArguments{}
+	err = json.Unmarshal([]byte(remediationString), &remediationAnnotation)
+	assert.Equal(t, bmh.RebootModeHard, remediationAnnotation.Mode)
+	assert.NoError(t, err)
+
 	// host is not yet powered off, nothing should happen
 	err = actuator.Update(context.TODO(), machine)
 	if err != nil {
@@ -2014,6 +2021,8 @@ func TestRemediation(t *testing.T) {
 	if _, exists := machine.Annotations[poweredOffForRemediation]; !exists {
 		t.Log("Expected powered-off-for-remediation annotation to exist on machine but none found")
 		t.Fail()
+	} else {
+		assert.Contains(t, host.Annotations, requestPowerOffAnnotation)
 	}
 
 	err = actuator.Update(context.TODO(), machine)
@@ -2296,7 +2305,7 @@ func getBareMetalHost(name string) (*bmh.BareMetalHost, types.NamespacedName) {
 		},
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "BareMetalHost",
-			APIVersion: bmh.SchemeGroupVersion.String(),
+			APIVersion: bmh.GroupVersion.String(),
 		},
 		Spec:   bmh.BareMetalHostSpec{},
 		Status: bmh.BareMetalHostStatus{},
