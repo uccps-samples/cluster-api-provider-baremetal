@@ -48,7 +48,7 @@ annotations:
 ```
 
 Remediation is done by power-cycling the Host associated with the unhealthy Machine,
-using [BMO reboot API](https://github.com/metal3-io/metal3-docs/blob/master/design/reboot-interface.md)
+using [BMO reboot API](https://github.com/metal3-io/metal3-docs/blob/master/design/baremetal-operator/reboot-interface.md)
 
 Remediation steps (triggered by the annotation mentioned above):
 1) Power off the host
