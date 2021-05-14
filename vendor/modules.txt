@@ -356,7 +356,7 @@ k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset
 k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/scheme
 k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1
 k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1beta1
-# k8s.io/apimachinery v0.22.0-alpha.0.0.20210417144234-8daf28983e6e
+# k8s.io/apimachinery v0.21.0
 ## explicit
 k8s.io/apimachinery/pkg/api/equality
 k8s.io/apimachinery/pkg/api/errors
@@ -416,7 +416,7 @@ k8s.io/apimachinery/third_party/forked/golang/reflect
 k8s.io/cli-runtime/pkg/genericclioptions
 k8s.io/cli-runtime/pkg/printers
 k8s.io/cli-runtime/pkg/resource
-# k8s.io/client-go v12.0.0+incompatible => k8s.io/client-go v0.0.0-20210417155731-8c8fa70f7a2a
+# k8s.io/client-go v12.0.0+incompatible => k8s.io/client-go v0.21.0
 ## explicit
 k8s.io/client-go/applyconfigurations/admissionregistration/v1
 k8s.io/client-go/applyconfigurations/admissionregistration/v1beta1
@@ -773,6 +773,6 @@ sigs.k8s.io/structured-merge-diff/v4/value
 ## explicit
 sigs.k8s.io/yaml
 # github.com/metal3-io/baremetal-operator => github.com/openshift/baremetal-operator v0.0.0-20210415160309-ce5311abf12c
-# k8s.io/client-go => k8s.io/client-go v0.0.0-20210417155731-8c8fa70f7a2a
+# k8s.io/client-go => k8s.io/client-go v0.21.0
 # sigs.k8s.io/cluster-api-provider-aws => github.com/openshift/cluster-api-provider-aws v0.2.1-0.20210514001231-4c66f3d38d89
 # sigs.k8s.io/cluster-api-provider-azure => github.com/openshift/cluster-api-provider-azure v0.1.0-alpha.3.0.20210513121131-b024905873bb
