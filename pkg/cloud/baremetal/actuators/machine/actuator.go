@@ -184,9 +184,11 @@ func (a *Actuator) Delete(ctx context.Context, machine *machinev1beta1.Machine) 
 		return a.releaseHost(ctx, host, machine)
 	}
 
-	if host.Spec.Image != nil || host.Spec.Online || host.Spec.UserData != nil {
+	if host.Spec.Image != nil || host.Spec.Online ||
+		host.Spec.UserData != nil || host.Spec.CustomDeploy != nil {
 		log.Printf("starting to deprovision host %v", host.Name)
 		host.Spec.Image = nil
+		host.Spec.CustomDeploy = nil
 		host.Spec.Online = false
 		host.Spec.UserData = nil
 		err = a.client.Update(ctx, host)
@@ -552,17 +554,23 @@ func (a *Actuator) provisionHost(ctx context.Context, host *bmh.BareMetalHost,
 	config *bmv1alpha1.BareMetalMachineProviderSpec) error {
 	originalHost := host.DeepCopy()
 
-	// We only want to update the image setting if the host does not
-	// already have an image.
-	//
-	// A host with an existing image is already provisioned and
-	// upgrades are not supported at this time. To re-provision a
-	// host, we must fully deprovision it and then provision it again.
-	if host.Spec.Image == nil {
+	// Set the host image if it is specified.
+	if config.Image.URL != "" && config.Image.Checksum != "" {
 		host.Spec.Image = &bmh.Image{
 			URL:      config.Image.URL,
 			Checksum: config.Image.Checksum,
 		}
+	}
+
+	// If customDeploy is set, use it.
+	if config.CustomDeploy.Method != "" {
+		host.Spec.CustomDeploy = &bmh.CustomDeploy{
+			Method: config.CustomDeploy.Method,
+		}
+	}
+
+	// Set UserData
+	if config.UserData != nil {
 		host.Spec.UserData = config.UserData
 
 		// If UserData does not include a Namespace, default to the Machine's
