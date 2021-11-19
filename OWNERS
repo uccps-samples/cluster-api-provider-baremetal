@@ -3,14 +3,12 @@ approvers:
   - hardys
   - mhrivnak
   - russellb
-  - stbenjam
   - zaneb
 # review == this code is good /lgtm
 reviewers:
   - hardys
   - mhrivnak
   - russellb
-  - stbenjam
   - zaneb
 
 # Bugzilla Information
