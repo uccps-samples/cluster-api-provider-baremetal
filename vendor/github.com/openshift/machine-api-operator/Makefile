@@ -3,6 +3,7 @@ DBG         ?= 0
 VERSION     ?= $(shell git describe --always --abbrev=7)
 MUTABLE_TAG ?= latest
 IMAGE        = $(REGISTRY)machine-api-operator
+BUILD_IMAGE ?= registry.ci.openshift.org/openshift/release:golang-1.17
 
 # Enable go modules and vendoring
 # https://github.com/golang/go/wiki/Modules#how-to-install-and-activate-module-support
@@ -38,9 +39,9 @@ ifeq ($(NO_DOCKER), 1)
   DOCKER_CMD =
   IMAGE_BUILD_CMD = imagebuilder
 else
-  DOCKER_CMD := $(ENGINE) run --env GO111MODULE=$(GO111MODULE) --env GOFLAGS=$(GOFLAGS) --rm -v "$(PWD)":/go/src/github.com/openshift/machine-api-operator:Z  -w /go/src/github.com/openshift/machine-api-operator openshift/origin-release:golang-1.16
+  DOCKER_CMD := $(ENGINE) run --env GO111MODULE=$(GO111MODULE) --env GOFLAGS=$(GOFLAGS) --rm -v "$(PWD)":/go/src/github.com/openshift/machine-api-operator:Z  -w /go/src/github.com/openshift/machine-api-operator $(BUILD_IMAGE)
   # The command below is for building/testing with the actual image that Openshift uses. Uncomment/comment out to use instead of above command. CI registry pull secret is required to use this image.
-  # DOCKER_CMD := $(ENGINE) run --env GO111MODULE=$(GO111MODULE) --env GOFLAGS=$(GOFLAGS) --rm -v "$(PWD)":/go/src/github.com/openshift/machine-api-operator:Z -w /go/src/github.com/openshift/machine-api-operator registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.15-openshift-4.6
+  # DOCKER_CMD := $(ENGINE) run --env GO111MODULE=$(GO111MODULE) --env GOFLAGS=$(GOFLAGS) --rm -v "$(PWD)":/go/src/github.com/openshift/machine-api-operator:Z -w /go/src/github.com/openshift/machine-api-operator registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.17-openshift-4.10
   IMAGE_BUILD_CMD = $(ENGINE) build
 endif
 
@@ -49,7 +50,7 @@ vendor:
 	$(DOCKER_CMD) ./hack/go-mod.sh
 
 .PHONY: check
-check: lint fmt vet verify-codegen test ## Run code validations
+check: verify-crds-sync lint fmt vet test ## Run code validations
 
 .PHONY: build
 build: machine-api-operator nodelink-controller machine-healthcheck machineset vsphere ## Build binaries
@@ -74,26 +75,6 @@ vsphere:
 machineset:
 	$(DOCKER_CMD) ./hack/go-build.sh machineset
 
-.PHONY: generate
-generate: gen-crd gogen update-codegen goimports
-	./hack/verify-diff.sh
-
-.PHONY: gogen
-gogen:
-	$(DOCKER_CMD) ./hack/go-gen.sh
-
-.PHONY: gen-crd
-gen-crd:
-	$(DOCKER_CMD) ./hack/gen-crd.sh
-
-.PHONY: update-codegen
-update-codegen:
-	$(DOCKER_CMD) ./hack/update-codegen.sh
-
-.PHONY: verify-codegen
-verify-codegen:
-	$(DOCKER_CMD) ./hack/verify-codegen.sh
-
 .PHONY: test-e2e
 test-e2e: ## Run openshift specific e2e tests
 	./hack/e2e.sh test-e2e
@@ -105,12 +86,6 @@ test-e2e-tech-preview: ## Run openshift specific e2e tech preview tests
 .PHONY: test-sec
 test-sec:
 	$(DOCKER_CMD) hack/gosec.sh ./...
-
-.PHONY: deploy-kubemark
-deploy-kubemark:
-	kustomize build config | kubectl apply -f -
-	kustomize build | kubectl apply -f -
-	kubectl apply -f config/kubemark-config-infra.yaml
 
 .PHONY: test
 test: ## Run tests
@@ -149,6 +124,14 @@ goimports: ## Go fmt your code
 .PHONY: vet
 vet: ## Apply go vet to all go files
 	$(DOCKER_CMD) hack/go-vet.sh ./...
+
+.PHONY: crds-sync
+crds-sync: ## Sync crds in install with the ones in the vendored oc/api
+	$(DOCKER_CMD) hack/crds-sync.sh .
+
+.PHONY: verify-crds-sync
+verify-crds-sync: ## Verify that the crds in install and the ones in vendored oc/api are in sync
+	$(DOCKER_CMD) hack/crds-sync.sh . && hack/verify-diff.sh .
 
 .PHONY: help
 help:

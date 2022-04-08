@@ -21,15 +21,17 @@ Have a question? See our [Frequently Asked Questions](FAQ.md) for common inquiri
 
 - MachineSet Controller
 
-Ensure presence of expected number of replicas and a given provider config for a set of machines.
+  Ensure presence of expected number of replicas and a given provider config for a set of machines.
 
 - Machine Controller
 
-  - [cluster-api-provider-aws](https://github.com/openshift/cluster-api-provider-aws)
+  Ensure that a provider instance is created for a Machine object in a given provider.
 
-  - [cluster-api-provider-gcp](https://github.com/openshift/cluster-api-provider-gcp)
+  - [machine-api-provider-aws](https://github.com/openshift/machine-api-provider-aws)
 
-  - [cluster-api-provider-azure](https://github.com/openshift/cluster-api-provider-azure)
+  - [machine-api-provider-gcp](https://github.com/openshift/machine-api-provider-gcp)
+
+  - [machine-api-provider-azure](https://github.com/openshift/machine-api-provider-azure)
 
   - [cluster-api-provider-libvirt](https://github.com/openshift/cluster-api-provider-libvirt)
 
@@ -39,17 +41,14 @@ Ensure presence of expected number of replicas and a given provider config for a
 
   - [cluster-api-provider-ovirt](https://github.com/openshift/cluster-api-provider-ovirt)
 
-Ensure that a provider instance is created for a Machine object in a given provider.
+- Nodelink Controller
 
-- Node link Controller
+  Ensure machines have a nodeRef based on IPs or providerID matching.
+  Annotate nodes with a label containing the machine name.
 
-Ensure machines have a nodeRef based on IPs or providerID matching.
-Annotate nodes with a label containing the machine name.
+- MachineHealthCheck Controller
 
-
-- Machine healthcheck controller
-
-Ensure machines targeted by MachineHealthCheck objects satisfy a healthiness criteria or are remediated otherwise.
+  Ensure machines targeted by MachineHealthCheck objects satisfy a healthiness criteria or are remediated otherwise.
 
 ## Creating machines
 
@@ -79,8 +78,11 @@ machine.openshift.io/cluster-api-machine-type: worker
 
 - Run:
 
+  Extract images.json to a file from
+  `install/0000_30_machine-api-operator_01_images.configmap.yaml` and run:
+
   ```sh
-  $ ./bin/machine-api-operator start --kubeconfig ${HOME}/.kube/config --images-json=pkg/operator/fixtures/images.json
+  $ ./bin/machine-api-operator start --kubeconfig ${HOME}/.kube/config --images-json=path/to/images.json
   ```
 
 - Image:
