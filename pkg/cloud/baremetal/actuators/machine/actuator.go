@@ -669,7 +669,12 @@ func (a *Actuator) ensureAnnotation(ctx context.Context, machine *machinev1beta1
 	if err := a.client.Update(ctx, machine); err != nil {
 		return gherrors.Wrap(err, "failed to update machine annotation")
 	}
-	return &machineapierrors.RequeueAfterError{}
+
+	// The update to the annotations will trigger a requeue once it is observed, but
+	// we must return RequeueAfterError so the controller knows the operation is not
+	// complete. Use a delay so that we don't requeue before the annotation change
+	// is observed.
+	return &machineapierrors.RequeueAfterError{RequeueAfter: requeueAfter}
 }
 
 // providerIDForHost returns a provider ID representing a given BareMetalHost
