@@ -6,7 +6,7 @@ require (
 	github.com/metal3-io/baremetal-operator v0.0.0-00010101000000-000000000000
 	github.com/metal3-io/baremetal-operator/apis v0.0.0
 	github.com/openshift/api v0.0.0-20220525145417-ee5b62754c68
-	github.com/openshift/machine-api-operator v0.2.1-0.20220601192856-d7fb6b5b87ef
+	github.com/openshift/machine-api-operator v0.2.1-0.20220608065814-f76a8f3ab734
 	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.7.0
 	golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd
