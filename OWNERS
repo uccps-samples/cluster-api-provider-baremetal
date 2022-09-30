@@ -1,18 +1,14 @@
 # approval == this is a good idea /approve
 approvers:
-  - dhellmann
+  - dtantsur
   - hardys
-  - mhrivnak
-  - russellb
-  - stbenjam
+  - honza
   - zaneb
 # review == this code is good /lgtm
 reviewers:
-  - dhellmann
+  - dtantsur
   - hardys
-  - mhrivnak
-  - russellb
-  - stbenjam
+  - honza
   - zaneb
 
 # Bugzilla Information
