@@ -1,0 +1,18 @@
+# approval == this is a good idea /approve
+approvers:
+  - hardys
+  - mhrivnak
+  - russellb
+  - stbenjam
+  - zaneb
+# review == this code is good /lgtm
+reviewers:
+  - hardys
+  - mhrivnak
+  - russellb
+  - stbenjam
+  - zaneb
+
+# Bugzilla Information
+component: "Bare Metal Hardware Provisioning"
+subcomponent: "cluster-api-provider"
